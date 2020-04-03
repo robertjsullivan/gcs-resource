@@ -1,17 +1,17 @@
 package gcsresource
 
 import (
+	"cloud.google.com/go/storage"
+	"context"
 	"errors"
-	"fmt"
+	"golang.org/x/oauth2"
+	oauthgoogle "golang.org/x/oauth2/google"
+	"google.golang.org/api/iterator"
+	"google.golang.org/api/option"
+	"gopkg.in/cheggaaa/pb.v1"
 	"io"
 	"net/http"
 	"os"
-
-	"golang.org/x/oauth2"
-	oauthgoogle "golang.org/x/oauth2/google"
-	"google.golang.org/api/googleapi"
-	"google.golang.org/api/storage/v1"
-	"gopkg.in/cheggaaa/pb.v1"
 )
 
 //go:generate counterfeiter -o fakes/fake_gcsclient.go . GCSClient
@@ -22,11 +22,11 @@ type GCSClient interface {
 	UploadFile(bucketName string, objectPath string, objectContentType string, localPath string, predefinedACL string, cacheControl string) (int64, error)
 	URL(bucketName string, objectPath string, generation int64) (string, error)
 	DeleteObject(bucketName string, objectPath string, generation int64) error
-	GetBucketObjectInfo(bucketName, objectPath string) (*storage.Object, error)
+	GetBucketObjectInfo(bucketName, objectPath string) (*storage.ObjectAttrs, error)
 }
 
 type gcsclient struct {
-	storageService *storage.Service
+	storageService *storage.Client
 	progressOutput io.Writer
 }
 
@@ -38,24 +38,27 @@ func NewGCSClient(
 	var storageClient *http.Client
 	var userAgent = "gcs-resource/0.0.1"
 
+	//To provide a custom HTTP client, use option.WithHTTPClient. If you are
+	// using google.golang.org/api/googleapis/transport.APIKey, use option.WithAPIKey with NewService instead.
+	//TODO try option.WithAPIKey
 	if jsonKey != "" {
-		storageJwtConf, err := oauthgoogle.JWTConfigFromJSON([]byte(jsonKey), storage.DevstorageFullControlScope)
+		storageJwtConf, err := oauthgoogle.JWTConfigFromJSON([]byte(jsonKey), storage.ScopeFullControl)
 		if err != nil {
 			return &gcsclient{}, err
 		}
 		storageClient = storageJwtConf.Client(oauth2.NoContext)
 	} else {
-		storageClient, err = oauthgoogle.DefaultClient(oauth2.NoContext, storage.DevstorageFullControlScope)
+		storageClient, err = oauthgoogle.DefaultClient(oauth2.NoContext, storage.ScopeFullControl)
 		if err != nil {
 			return &gcsclient{}, err
 		}
 	}
 
-	storageService, err := storage.New(storageClient)
+	ctx := context.Background()
+	storageService, err := storage.NewClient(ctx, option.WithHTTPClient(storageClient), option.WithUserAgent(userAgent))
 	if err != nil {
 		return &gcsclient{}, err
 	}
-	storageService.UserAgent = userAgent
 
 	return &gcsclient{
 		storageService: storageService,
@@ -73,6 +76,7 @@ func (gcsclient *gcsclient) BucketObjects(bucketName string, prefix string) ([]s
 }
 
 func (gcsclient *gcsclient) ObjectGenerations(bucketName string, objectPath string) ([]int64, error) {
+	println("Getting Object Generations for bucket", bucketName, "objectPath", objectPath)
 	isBucketVersioned, err := gcsclient.getBucketVersioning(bucketName)
 	if err != nil {
 		return []int64{}, err
@@ -81,13 +85,15 @@ func (gcsclient *gcsclient) ObjectGenerations(bucketName string, objectPath stri
 	if !isBucketVersioned {
 		return []int64{}, errors.New("bucket is not versioned")
 	}
+	ctx := context.Background()
+	attrs, err := gcsclient.storageService.Bucket(bucketName).Object(objectPath).Attrs(ctx)
+	//objectGenerations, err := gcsclient.getObjectGenerations(bucketName, objectPath)
 
-	objectGenerations, err := gcsclient.getObjectGenerations(bucketName, objectPath)
 	if err != nil {
 		return []int64{}, err
 	}
 
-	return objectGenerations, nil
+	return []int64{attrs.Generation}, nil
 }
 
 func (gcsclient *gcsclient) DownloadFile(bucketName string, objectPath string, generation int64, localPath string) error {
@@ -100,34 +106,56 @@ func (gcsclient *gcsclient) DownloadFile(bucketName string, objectPath string, g
 		return errors.New("bucket is not versioned")
 	}
 
-	getCall := gcsclient.storageService.Objects.Get(bucketName, objectPath)
-	if generation != 0 {
-		getCall = getCall.Generation(generation)
-	}
-
-	object, err := getCall.Do()
-	if err != nil {
-		return err
-	}
+	//getCall := gcsclient.storageService.Objects.Get(bucketName, objectPath)
+	//if generation != 0 {
+	//	getCall = getCall.Generation(generation)
+	//}
+	//
+	//object, err := getCall.Do()
+	//if err != nil {
+	//	return err
+	//}
+	//
+	//localFile, err := os.Create(localPath)
+	//if err != nil {
+	//	return err
+	//}
+	//defer localFile.Close()
+	//
+	//progress := gcsclient.newProgressBar(int64(object.Size))
+	//progress.Start()
+	//defer progress.Finish()
+	//
+	//response, err := getCall.Download()
+	//if err != nil {
+	//	return err
+	//}
+	//defer response.Body.Close()
+	//
+	//reader := progress.NewProxyReader(response.Body)
+	//_, err = io.Copy(localFile, reader)
+	//if err != nil {
+	//	return err
+	//}
 
 	localFile, err := os.Create(localPath)
 	if err != nil {
 		return err
 	}
 	defer localFile.Close()
-
-	progress := gcsclient.newProgressBar(int64(object.Size))
-	progress.Start()
-	defer progress.Finish()
-
-	response, err := getCall.Download()
+	//TODO PROGRESS BAR?
+	//progress := gcsclient.newProgressBar(int64(object.Size))
+	//progress.Start()
+	//defer progress.Finish()
+	//
+	ctx := context.Background()
+	rc, err := gcsclient.storageService.Bucket(bucketName).Object(objectPath).NewReader(ctx)
 	if err != nil {
 		return err
 	}
-	defer response.Body.Close()
+	defer rc.Close()
 
-	reader := progress.NewProxyReader(response.Body)
-	_, err = io.Copy(localFile, reader)
+	_, err = io.Copy(localFile, rc)
 	if err != nil {
 		return err
 	}
@@ -156,102 +184,181 @@ func (gcsclient *gcsclient) UploadFile(bucketName string, objectPath string, obj
 	progress.Start()
 	defer progress.Finish()
 
-	object := &storage.Object{
-		Name:         objectPath,
-		ContentType:  objectContentType,
-		CacheControl: cacheControl,
-	}
-
-	var mediaOptions []googleapi.MediaOption
-	if objectContentType != "" {
-		mediaOptions = append(mediaOptions, googleapi.ContentType(objectContentType))
-	}
-
-	insertCall := gcsclient.storageService.Objects.Insert(bucketName, object).Media(progress.NewProxyReader(localFile), mediaOptions...)
-	if predefinedACL != "" {
-		insertCall = insertCall.PredefinedAcl(predefinedACL)
-	}
-
-	uploadedObject, err := insertCall.Do()
-	if err != nil {
+	ctx := context.Background()
+	wc := gcsclient.storageService.Bucket(bucketName).Object(objectPath).NewWriter(ctx)
+	written := int64(0)
+	if written, err = io.Copy(wc, localFile); err != nil {
 		return 0, err
 	}
 
+	if err := wc.Close(); err != nil {
+		return written, err
+	}
+
+	if predefinedACL != "" {
+		//TODO set ACL
+		println("set a predefined acl")
+		//gcsclient.storageService.Bucket(bucketName).Object(objectPath).ACL().Set(ctx)
+	}
+
+	if cacheControl != "" {
+		//TODO cache control
+		println("set cache control")
+	}
+
+	if objectContentType != "" {
+		//TODO media options
+		//var mediaOptions []googleapi.MediaOption
+		//if objectContentType != "" {
+		//	mediaOptions = append(mediaOptions, googleapi.ContentType(objectContentType))
+		//}
+		println("set media options")
+	}
+
+	//object := &storage.Object{
+	//	Name:         objectPath,
+	//	ContentType:  objectContentType,
+	//	CacheControl: cacheControl,
+	//}
+	//
+	//var mediaOptions []googleapi.MediaOption
+	//if objectContentType != "" {
+	//	mediaOptions = append(mediaOptions, googleapi.ContentType(objectContentType))
+	//}
+	//
+	//insertCall := gcsclient.storageService.Objects.Insert(bucketName, object).Media(progress.NewProxyReader(localFile), mediaOptions...)
+	//if predefinedACL != "" {
+	//	insertCall = insertCall.PredefinedAcl(predefinedACL)
+	//}
+	//
+	//uploadedObject, err := insertCall.Do()
+	//if err != nil {
+	//	return 0, err
+	//}
+	//
 	if isBucketVersioned {
-		return uploadedObject.Generation, nil
+		return written, nil
 	}
 
 	return 0, nil
 }
 
 func (gcsclient *gcsclient) URL(bucketName string, objectPath string, generation int64) (string, error) {
-	getCall := gcsclient.storageService.Objects.Get(bucketName, objectPath)
-	if generation != 0 {
-		getCall = getCall.Generation(generation)
-	}
+	ctx := context.Background()
+	attrs, err := gcsclient.storageService.Bucket(bucketName).Object(objectPath).Attrs(ctx)
 
-	_, err := getCall.Do()
 	if err != nil {
 		return "", err
 	}
 
-	var url string
-	if generation != 0 {
-		url = fmt.Sprintf("gs://%s/%s#%d", bucketName, objectPath, generation)
-	} else {
-		url = fmt.Sprintf("gs://%s/%s", bucketName, objectPath)
-	}
+	return attrs.MediaLink, nil
 
-	return url, nil
+	//if generation != 0 {
+	//	getCall = getCall.Generation(generation)
+	//}
+	//
+	//_, err := getCall.Do()
+	//if err != nil {
+	//	return "", err
+	//}
+	//
+	//var url string
+	//if generation != 0 {
+	//	url = fmt.Sprintf("gs://%s/%s#%d", bucketName, objectPath, generation)
+	//} else {
+	//	url = fmt.Sprintf("gs://%s/%s", bucketName, objectPath)
+	//}
+
+	//return url, nil
 }
 
 func (gcsclient *gcsclient) DeleteObject(bucketName string, objectPath string, generation int64) error {
-	deleteCall := gcsclient.storageService.Objects.Delete(bucketName, objectPath)
-	if generation != 0 {
-		deleteCall = deleteCall.Generation(generation)
-	}
+	//deleteCall := gcsclient.storageService.Objects.Delete(bucketName, objectPath)
+	//if generation != 0 {
+	//	deleteCall = deleteCall.Generation(generation)
+	//}
+	//
+	//err := deleteCall.Do()
+	//if err != nil {
+	//	return err
+	//}
+	//
+	//return nil
 
-	err := deleteCall.Do()
+	ctx := context.Background()
+	err := gcsclient.storageService.Bucket(bucketName).Object(objectPath).Delete(ctx)
+
 	if err != nil {
 		return err
 	}
-
 	return nil
 }
 
-func (gcsclient *gcsclient) GetBucketObjectInfo(bucketName, objectPath string) (*storage.Object, error) {
-	getCall := gcsclient.storageService.Objects.Get(bucketName, objectPath)
-	object, err := getCall.Do()
+func (gcsclient *gcsclient) GetBucketObjectInfo(bucketName, objectPath string) (*storage.ObjectAttrs, error) {
+	//getCall := gcsclient.storageService.Objects.Get(bucketName, objectPath)
+	//object, err := getCall.Do()
+	//if err != nil {
+	//	return nil, err
+	//}
+	//
+	//return object, nil
+
+	ctx := context.Background()
+	attrs, err := gcsclient.storageService.Bucket(bucketName).Object(objectPath).Attrs(ctx)
+
 	if err != nil {
 		return nil, err
 	}
-
-	return object, nil
+	return attrs, nil
 }
 
 func (gcsclient *gcsclient) getBucketObjects(bucketName string, prefix string) ([]string, error) {
+	//var bucketObjects []string
+	//
+	//pageToken := ""
+	//for {
+	//	listCall := gcsclient.storageService.Objects.List(bucketName)
+	//	listCall = listCall.PageToken(pageToken)
+	//	listCall = listCall.Prefix(prefix)
+	//	listCall = listCall.Versions(false)
+	//
+	//	objects, err := listCall.Do()
+	//	if err != nil {
+	//		return bucketObjects, err
+	//	}
+	//
+	//	for _, object := range objects.Items {
+	//		bucketObjects = append(bucketObjects, object.Name)
+	//	}
+	//
+	//	if objects.NextPageToken != "" {
+	//		pageToken = objects.NextPageToken
+	//	} else {
+	//		break
+	//	}
+	//}
+	//
+	//return bucketObjects, nil
+
 	var bucketObjects []string
-
-	pageToken := ""
 	for {
-		listCall := gcsclient.storageService.Objects.List(bucketName)
-		listCall = listCall.PageToken(pageToken)
-		listCall = listCall.Prefix(prefix)
-		listCall = listCall.Versions(false)
-
-		objects, err := listCall.Do()
-		if err != nil {
-			return bucketObjects, err
+		ctx := context.Background()
+		pageToken := ""
+		query := &storage.Query{
+			Delimiter: pageToken,
+			Prefix:    prefix,
+			Versions:  false,
 		}
-
-		for _, object := range objects.Items {
+		objectIterator := gcsclient.storageService.Bucket(bucketName).Objects(ctx, query)
+		for {
+			object, err := objectIterator.Next()
+			if err == iterator.Done {
+				break
+			}
+			if err != nil {
+				return nil, err
+			}
 			bucketObjects = append(bucketObjects, object.Name)
-		}
-
-		if objects.NextPageToken != "" {
-			pageToken = objects.NextPageToken
-		} else {
-			break
 		}
 	}
 
@@ -259,48 +366,45 @@ func (gcsclient *gcsclient) getBucketObjects(bucketName string, prefix string) (
 }
 
 func (gcsclient *gcsclient) getBucketVersioning(bucketName string) (bool, error) {
-	bucket, err := gcsclient.storageService.Buckets.Get(bucketName).Do()
+	ctx := context.Background()
+	bucket, err := gcsclient.storageService.Bucket(bucketName).Attrs(ctx)
 	if err != nil {
 		return false, err
 	}
 
-	if bucket.Versioning != nil {
-		return bucket.Versioning.Enabled, nil
-	}
-
-	return false, nil
+	return bucket.VersioningEnabled, nil
 }
 
-func (gcsclient *gcsclient) getObjectGenerations(bucketName string, objectPath string) ([]int64, error) {
-	var objectGenerations []int64
-
-	pageToken := ""
-	for {
-		listCall := gcsclient.storageService.Objects.List(bucketName)
-		listCall = listCall.PageToken(pageToken)
-		listCall = listCall.Prefix(objectPath)
-		listCall = listCall.Versions(true)
-
-		objects, err := listCall.Do()
-		if err != nil {
-			return objectGenerations, err
-		}
-
-		for _, object := range objects.Items {
-			if object.Name == objectPath {
-				objectGenerations = append(objectGenerations, object.Generation)
-			}
-		}
-
-		if objects.NextPageToken != "" {
-			pageToken = objects.NextPageToken
-		} else {
-			break
-		}
-	}
-
-	return objectGenerations, nil
-}
+//func (gcsclient *gcsclient) getObjectGenerations(bucketName string, objectPath string) ([]int64, error) {
+//	var objectGenerations []int64
+//
+//	pageToken := ""
+//	for {
+//		listCall := gcsclient.storageService.Objects.List(bucketName)
+//		listCall = listCall.PageToken(pageToken)
+//		listCall = listCall.Prefix(objectPath)
+//		listCall = listCall.Versions(true)
+//
+//		objects, err := listCall.Do()
+//		if err != nil {
+//			return objectGenerations, err
+//		}
+//
+//		for _, object := range objects.Items {
+//			if object.Name == objectPath {
+//				objectGenerations = append(objectGenerations, object.Generation)
+//			}
+//		}
+//
+//		if objects.NextPageToken != "" {
+//			pageToken = objects.NextPageToken
+//		} else {
+//			break
+//		}
+//	}
+//
+//	return objectGenerations, nil
+//}
 
 func (gcsclient *gcsclient) newProgressBar(total int64) *pb.ProgressBar {
 	progress := pb.New64(total)
