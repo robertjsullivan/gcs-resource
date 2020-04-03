@@ -437,7 +437,7 @@ var _ = Describe("in", func() {
 				})
 
 				It("returns an error", func() {
-					Expect(session.Err).To(gbytes.Say("error running command: googleapi:"))
+					Expect(session.Err).To(gbytes.Say("error running command: storage: object doesn't exist"))
 				})
 			})
 		})
@@ -826,7 +826,7 @@ var _ = Describe("in", func() {
 				})
 
 				It("returns an error", func() {
-					Expect(session.Err).To(gbytes.Say("error running command: googleapi:"))
+					Expect(session.Err).To(gbytes.Say("error running command: storage: object doesn't exist"))
 				})
 			})
 
@@ -927,7 +927,7 @@ var _ = Describe("in", func() {
 				})
 
 				It("returns an error", func() {
-					Expect(session.Err).To(gbytes.Say("error running command: googleapi:"))
+					Expect(session.Err).To(gbytes.Say("error running command: storage: object doesn't exist"))
 				})
 			})
 		})
