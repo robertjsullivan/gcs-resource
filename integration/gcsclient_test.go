@@ -95,6 +95,7 @@ var _ = Describe("GCSclient", func() {
 			read, err := ioutil.ReadFile(filepath.Join(tempDir, "downloaded-file"))
 			Expect(err).ToNot(HaveOccurred())
 			Expect(read).To(Equal([]byte("hello-" + runtime)))
+
 		})
 	})
 
